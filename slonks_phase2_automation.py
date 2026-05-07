@@ -2,77 +2,102 @@
 from __future__ import annotations
 import argparse,csv,re,subprocess,sys,time
 from pathlib import Path
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
 BLOCK=re.compile(r"merge|wallet|connect|approve|confirm|transaction",re.I)
 
 
-def log(msg,debug=True):
-    if debug: print(msg, flush=True)
+def log(msg): print(msg, flush=True)
 
 def read_candidates(path:Path):
-    out=[]
     with path.open('r',encoding='utf-8',newline='') as f:
-        for r in csv.DictReader(f):
-            out.append({"token_id":int(r.get('token_id','0') or 0),"price_eth":r.get('price_eth',''),"url":r.get('url',''),"marketplace":r.get('marketplace','')})
-    return out
+        return [{"token_id":int(r.get('token_id','0') or 0),"price_eth":r.get('price_eth',''),"url":r.get('url',''),"marketplace":r.get('marketplace','')} for r in csv.DictReader(f)]
 
 def screenshot(page, d:Path, name:str):
-    d.mkdir(parents=True,exist_ok=True)
-    page.screenshot(path=str(d/f"{name}.png"),full_page=True)
+    d.mkdir(parents=True,exist_ok=True); page.screenshot(path=str(d/f"{name}.png"),full_page=True)
 
-def pick_input(page, key:str, nth:int):
-    options=[
-        page.get_by_placeholder(key, exact=False),
-        page.get_by_label(key, exact=False),
-        page.locator(f"input[placeholder*='{key}' i]"),
-        page.locator("input")
+def find_keep_burn_controls(page):
+    keep = page.get_by_text(re.compile(r"keep",re.I)).first
+    burn = page.get_by_text(re.compile(r"burn",re.I)).first
+    return keep, burn
+
+def select_token(page, role:str, token_id:int):
+    # role: keep or burn
+    # try label/placeholder/combobox/input near role first
+    cands=[
+        page.get_by_label(role, exact=False),
+        page.get_by_placeholder(role, exact=False),
+        page.locator(f"*:has-text('{role}') >> xpath=.. >> input"),
+        page.get_by_role('combobox'),
+        page.locator('input')
     ]
-    for loc in options:
-        if loc.count()>0:
-            return loc.nth(min(nth,loc.count()-1))
-    raise RuntimeError(f"input not found: {key}")
+    target=None
+    for c in cands:
+        if c.count()>0:
+            target=c.first; break
+    if not target: raise RuntimeError(f"找不到 {role} input")
+    target.click(timeout=2000)
+    target.fill(str(token_id))
+    # try pick search result
+    for sel in [page.get_by_text(re.compile(rf"\b{token_id}\b")), page.locator(f"text=#{token_id}"), page.locator(f"li:has-text('{token_id}')")]:
+        if sel.count()>0:
+            try:
+                sel.first.click(timeout=2000)
+                return
+            except Exception:
+                pass
+    # if no selectable result, keep filled value; caller will verify
 
-def safe_preview_button(page):
-    options=[
-        page.get_by_text("Preview", exact=False),
-        page.locator("button:has-text('Preview')"),
-        page.locator("button:has-text('Simulate')"),
-        page.get_by_role("button", name=re.compile(r"preview|simulate|no\s*-?\s*gas",re.I)),
-    ]
-    for loc in options:
-        if loc.count()==0: continue
-        for i in range(loc.count()):
-            b=loc.nth(i)
-            txt=(b.inner_text(timeout=1000) or '').strip()
-            if not BLOCK.search(txt):
-                return b
-    raise RuntimeError("safe preview/simulate button not found")
+def verify_selection(page, survivor_id:int, donor_id:int):
+    txt=page.inner_text('body')
+    has_survivor=str(survivor_id) in txt
+    has_donor=str(donor_id) in txt
+    donor_zero=bool(re.search(r"burn\s*[:：]?\s*0\b", txt, re.I))
+    return has_survivor, has_donor, donor_zero
 
-def read_result_slop(page, timeout_ms=10000):
-    deadline=time.time()+timeout_ms/1000
-    while time.time()<deadline:
-        for loc in [page.locator(r"text=/result\s*slop/i"), page.locator(r"text=/slop/i")]:
+def preview_button(page):
+    opts=[page.get_by_text('Preview',exact=False),page.locator("button:has-text('Preview')"),page.locator("button:has-text('Simulate')"),page.get_by_role('button',name=re.compile(r'preview|simulate|no\s*-?\s*gas',re.I))]
+    for o in opts:
+        if o.count()==0: continue
+        for i in range(o.count()):
+            b=o.nth(i)
+            t=(b.inner_text(timeout=800) or '').strip()
+            if not BLOCK.search(t): return b
+    raise RuntimeError('找不到 Preview/no-gas simulate 按钮')
+
+def read_result_slop(page):
+    end=time.time()+10
+    while time.time()<end:
+        for loc in [page.locator(r"text=/result\s*slop/i"),page.locator(r"text=/slop/i")]:
             if loc.count()==0: continue
-            txt=loc.first.inner_text(timeout=1200)
-            m=re.findall(r"[-+]?\d+(?:\.\d+)?",txt)
+            t=loc.first.inner_text(timeout=1200)
+            m=re.findall(r"[-+]?\d+(?:\.\d+)?",t)
             if m: return m[-1]
         time.sleep(0.5)
-    raise RuntimeError("result_slop not found within timeout")
+    raise RuntimeError('result slop not found')
 
-def run_one(page, survivor, donor, ssdir:Path, idx:str, debug=False):
-    log(f"[case {idx}] testing survivor={survivor} donor={donor}",debug)
-    s_in=pick_input(page,'survivor',0); d_in=pick_input(page,'donor',1)
-    s_in.fill(str(survivor)); d_in.fill(str(donor))
-    screenshot(page,ssdir,f"{idx}_filled")
-    btn=safe_preview_button(page)
+def run_case(page, base, donor, ssdir:Path):
+    try:
+        select_token(page,'keep',base)
+    except Exception as e:
+        raise RuntimeError(f'找不到 survivor input: {e}')
+    try:
+        select_token(page,'burn',donor)
+    except Exception as e:
+        raise RuntimeError(f'找不到 donor input: {e}')
+
+    has_s,has_d,donor_zero=verify_selection(page,base,donor)
+    screenshot(page,ssdir,f'before_preview_{base}_{donor}')
+    if not has_s: raise RuntimeError('找不到 token search result: survivor not visible')
+    if not has_d: raise RuntimeError('找不到 token search result: donor not visible')
+    if donor_zero: raise RuntimeError('donor token was not selected, burn value stayed 0')
+
+    btn=preview_button(page)
+    if not btn.is_enabled():
+        raise RuntimeError('preview button disabled')
     btn.click(timeout=3000)
-    log(f"[case {idx}] preview click ok",debug)
-    screenshot(page,ssdir,f"{idx}_clicked")
-    val=read_result_slop(page,timeout_ms=10000)
-    log(f"[case {idx}] result_slop={val}",debug)
-    return val
-
+    screenshot(page,ssdir,f'after_preview_{base}_{donor}')
+    return read_result_slop(page)
 
 def main():
     ap=argparse.ArgumentParser()
@@ -88,36 +113,28 @@ def main():
     args=ap.parse_args()
 
     rows=[]; ssdir=Path(args.screenshot_dir)
-    cands=read_candidates(Path(args.candidates))
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=args.headless and not args.debug, slow_mo=args.slowmo)
-        page=browser.new_page()
-        page.goto('https://slonks.xyz/merge-lab',wait_until='domcontentloaded',timeout=90000)
+        page=browser.new_page(); page.goto('https://slonks.xyz/merge-lab',wait_until='domcontentloaded',timeout=90000)
         screenshot(page,ssdir,'00_loaded')
-        case_i=0
-        for c in cands:
-            cid=c['token_id']
-            dirs=[(args.base,cid)] + ([(cid,args.base)] if args.both_directions else [])
+        for c in read_candidates(Path(args.candidates)):
+            dirs=[(args.base,c['token_id'])] + ([(c['token_id'],args.base)] if args.both_directions else [])
             for s,d in dirs:
-                case_i+=1
                 rec={"survivor_id":s,"donor_id":d,"result_slop":"","price_eth":c['price_eth'],"url":c['url'],"marketplace":c['marketplace'],"status":"ok","note":"preview"}
+                log(f"testing survivor={s} donor={d}")
                 try:
-                    rec['result_slop']=run_one(page,s,d,ssdir,f"{case_i:04d}",args.debug)
-                    if s!=args.base: rec['note']='reverse (burns base)'
+                    rec['result_slop']=run_case(page,s,d,ssdir)
+                    log(f"success result_slop={rec['result_slop']}")
                 except Exception as e:
                     rec['status']='error'; rec['note']=str(e)
-                    log(f"[case {case_i:04d}] failed: {e}",True)
-                    try: screenshot(page,ssdir,f"{case_i:04d}_failed")
-                    except Exception: pass
+                    log(f"failed: {e}")
+                    screenshot(page,ssdir,f'failed_{s}_{d}')
                 rows.append(rec)
         with Path(args.out).open('w',encoding='utf-8',newline='') as f:
-            w=csv.DictWriter(f,fieldnames=['survivor_id','donor_id','result_slop','price_eth','url','marketplace','status','note'])
-            w.writeheader(); w.writerows(rows)
+            w=csv.DictWriter(f,fieldnames=['survivor_id','donor_id','result_slop','price_eth','url','marketplace','status','note']);w.writeheader();w.writerows(rows)
         subprocess.run([sys.executable,'slonks_optimizer.py','--pairs',args.out],check=False)
-
         if args.keep_open or args.debug:
-            log("Debug mode active. Press Enter in terminal to close browser...",True)
-            input()
+            log('Debug mode active. Press Enter to close browser...'); input()
         browser.close()
 
 if __name__=='__main__': main()
