@@ -20,3 +20,7 @@
 - `pairs.csv`
 - `ranked_pairs.csv`
 - `merge_plan.csv`
+
+
+## 调试命令
+`python slonks_phase2_automation.py --base 1139 --candidates candidates.csv --debug --keep-open --slowmo 300`
