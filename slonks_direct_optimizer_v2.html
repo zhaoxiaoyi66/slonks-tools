@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Slonks Direct Merge Optimizer v2</title>
+  <style>
+    :root { --bg:#0b0c10; --card:#151820; --muted:#8b95a7; --text:#f2f5f9; --line:#2a3040; --good:#4ade80; --bad:#fb7185; --warn:#fbbf24; --accent:#93c5fd; }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+    header{padding:22px 24px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#111522,#0b0c10)}
+    h1{font-size:22px;margin:0 0 6px}
+    p{color:var(--muted);line-height:1.55}
+    main{padding:22px;max-width:1280px;margin:auto}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:0 8px 20px rgba(0,0,0,.18)}
+    label{display:block;margin:10px 0 6px;color:#d6dce8;font-size:14px}
+    textarea,input,select{width:100%;background:#0f1219;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:14px}
+    textarea{min-height:108px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    button{border:0;border-radius:10px;padding:11px 14px;background:#2563eb;color:white;font-weight:700;cursor:pointer;margin:8px 8px 0 0}
+    button.secondary{background:#303849}
+    button.danger{background:#7f1d1d}
+    .small{font-size:12px;color:var(--muted)}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .status{white-space:pre-wrap;background:#0f1219;border:1px solid var(--line);border-radius:10px;padding:10px;min-height:110px;color:#cbd5e1}
+    table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
+    th,td{border-bottom:1px solid var(--line);padding:8px;text-align:right;vertical-align:top}
+    th{position:sticky;top:0;background:#1b2130;z-index:1;color:#cbd5e1}
+    td.left,th.left{text-align:left}
+    .good{color:var(--good);font-weight:700}
+    .bad{color:var(--bad);font-weight:700}
+    .warn{color:var(--warn);font-weight:700}
+    .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:#cbd5e1;background:#0f1219;font-size:12px}
+    .bar{height:6px;background:#0f1219;border-radius:99px;overflow:hidden}
+    .bar span{display:block;height:100%;background:var(--accent)}
+    @media(max-width:900px){.grid{grid-template-columns:1fr} main{padding:14px}}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Slonks 一键合成组合分析器 v2</h1>
+  <p>输入 Slonks 编号，它会读取链上数据、按同 Level 两两组合、模拟 embedding 平均，并给出最优 survivor/donor 方向。只读链上，不连接钱包，不会上链。</p>
+</header>
+
+<main>
+  <div class="grid">
+    <section class="card">
+      <h2>输入</h2>
+      <label>Slonks 编号，空格/逗号/换行都可以</label>
+      <textarea id="ids" oninput="previewIds()">1139 583 8096</textarea>
+      <p class="small">已识别：<span id="parsedIds" class="mono"></span></p>
+
+      <label>RPC 节点</label>
+      <select id="rpc">
+        <option value="https://eth.llamarpc.com">eth.llamarpc.com</option>
+        <option value="https://ethereum.publicnode.com">ethereum.publicnode.com</option>
+        <option value="https://rpc.ankr.com/eth">Ankr public ETH</option>
+        <option value="https://cloudflare-eth.com">Cloudflare ETH</option>
+      </select>
+
+      <label>额外校准 Token 数量</label>
+      <input id="calibCount" type="number" value="120" min="0" max="1000"/>
+      <p class="small">如果结果不是 exact，把这里调到 300 或 500 再跑。</p>
+
+      <label>额外指定校准编号，可不填</label>
+      <textarea id="calibIds" style="min-height:60px">0 1 2 3 4 5 6 7 8 9 2352 5290 8638 3784 624 2698 2510 2639 7035 1139 583 8096</textarea>
+
+      <button onclick="run()">开始分析</button>
+      <button class="secondary" onclick="downloadCSV()">下载结果 CSV</button>
+      <button class="danger" onclick="clearCache()">清缓存</button>
+    </section>
+
+    <section class="card">
+      <h2>状态</h2>
+      <div id="status" class="status">输入编号后，点“开始分析”。这个 v2 版本不会自动启动，所以不会再出现你还没点按钮就报错的情况。</div>
+      <p class="small">如果提示“没有同 Level 组合”，说明这些 NFT 不是同级，不能互相合成。</p>
+      <p class="small">如果提示 RPC 错误，换一个 RPC 节点再点开始。</p>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:16px">
+    <h2>推荐组合</h2>
+    <div id="summary"></div>
+    <div id="results"></div>
+  </section>
+
+  <section class="card" style="margin-top:16px">
+    <h2>Token 数据</h2>
+    <div id="tokens"></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<script>
+const ADDR = {
+  slonks: "0x832233ddb7bcffd0ed53127dd6be3f1aa5845108",
+  renderer: "0x103d4ef6e7d87ea27355b402a4ae0875c3fb32a1",
+  model: "0xCa116243a2013ED33015c776ee37310b199Ee80c",
+  merge: "0x3e5bb2a724dBe9a6afE04ae7581639367693F51c"
+};
+const ABI = {
+  slonks: ["function sourceIdFor(uint256 tokenId) view returns (uint256)","function ownerOf(uint256 tokenId) view returns (address)"],
+  renderer: ["function diffPixelCount(uint256 tokenId) view returns (uint16)","function renderPixels(uint256 tokenId) view returns (bytes)","function diffMask(uint256 tokenId) view returns (bytes)","function originalPixelsForSource(uint256 sourceId) view returns (bytes)","function attributesText(uint256 tokenId) view returns (string)"],
+  model: ["function sourceEmbedding(uint256 sourceId) view returns (bytes)","function renderEmbeddingPixels(bytes embedding) view returns (bytes)"],
+  merge: ["function mergeLevel(uint256 tokenId) view returns (uint8)","function mergeEmbedding(uint256 tokenId) view returns (bytes)"]
+};
+let provider, C, latestRows = [], latestTokens = [], palette = new Map(), tokenCache = new Map();
+
+function parseIds(text) {
+  const normalized = String(text || "").replace(/[，、；;|\t\r\n]+/g, " ");
+  return [...new Set((normalized.match(/[0-9]+/g) || []).map(x => Number(x)).filter(x => Number.isInteger(x) && x >= 0 && x < 10000))];
+}
+function previewIds() {
+  const ids = parseIds(document.getElementById("ids").value);
+  document.getElementById("parsedIds").textContent = ids.length ? ids.join(", ") + `（共 ${ids.length} 个）` : "未识别到编号";
+}
+function setStatus(msg){ document.getElementById("status").textContent = msg; }
+function log(msg){ const el=document.getElementById("status"); el.textContent += "\n" + msg; el.scrollTop = el.scrollHeight; }
+function bytes(hex){ return Array.from(ethers.getBytes(hex)); }
+function hex4(arr,i){ return [arr[i],arr[i+1],arr[i+2],arr[i+3]].map(x=>x.toString(16).padStart(2,"0")).join(""); }
+function isDiff(mask,pixel){ const byte=mask[Math.floor(pixel/8)]||0; const bit=7-(pixel%8); return ((byte>>bit)&1)===1; }
+function toSigned(u){ return u>127?u-256:u; }
+function toUint8(s){ return s<0?s+256:s; }
+function blendEmb(aHex,bHex){ const a=bytes(aHex), b=bytes(bHex); const n=Math.min(a.length,b.length); const out=new Uint8Array(n); for(let i=0;i<n;i++){ const z=Math.trunc((toSigned(a[i])+toSigned(b[i]))/2); out[i]=toUint8(z); } return ethers.hexlify(out); }
+function fmt(x,d=2){ if(x===null||x===undefined||Number.isNaN(x))return""; if(!Number.isFinite(x))return String(x); return Number(x).toFixed(d).replace(/\.0+$/,"").replace(/(\.\d*?)0+$/,"$1"); }
+function shortAddr(a){ return a ? a.slice(0,6)+"…"+a.slice(-4) : ""; }
+async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+async function setup(){
+  if (!window.ethers) throw new Error("ethers CDN 没加载成功。请确认网络能访问 jsdelivr，或者换浏览器。");
+  provider = new ethers.JsonRpcProvider(document.getElementById("rpc").value);
+  C = {
+    slonks:new ethers.Contract(ADDR.slonks,ABI.slonks,provider),
+    renderer:new ethers.Contract(ADDR.renderer,ABI.renderer,provider),
+    model:new ethers.Contract(ADDR.model,ABI.model,provider),
+    merge:new ethers.Contract(ADDR.merge,ABI.merge,provider)
+  };
+}
+async function getToken(id){
+  if(tokenCache.has(id)) return tokenCache.get(id);
+  const [sourceIdRaw, levelRaw, slopRaw, owner] = await Promise.all([
+    C.slonks.sourceIdFor(id),
+    C.merge.mergeLevel(id),
+    C.renderer.diffPixelCount(id),
+    C.slonks.ownerOf(id).catch(()=>"")
+  ]);
+  const sourceId=Number(sourceIdRaw), level=Number(levelRaw), slop=Number(slopRaw);
+  const embedding = level===0 ? await C.model.sourceEmbedding(sourceId) : await C.merge.mergeEmbedding(id);
+  const [renderPixelsHex,diffMaskHex,originalHex,attrs] = await Promise.all([
+    C.renderer.renderPixels(id),
+    C.renderer.diffMask(id),
+    C.renderer.originalPixelsForSource(sourceId),
+    C.renderer.attributesText(id).catch(()=>"")
+  ]);
+  const t = {id, sourceId, level, slop, owner, embedding, attrs, renderPixels:bytes(renderPixelsHex), diffMask:bytes(diffMaskHex), original:bytes(originalHex)};
+  tokenCache.set(id,t); return t;
+}
+function addPaletteFromToken(t){
+  let added=0;
+  for(let p=0;p<576;p++){
+    if(!isDiff(t.diffMask,p)){
+      const idx=t.renderPixels[p], rgba=hex4(t.original,p*4);
+      if(!palette.has(idx)){ palette.set(idx,rgba); added++; }
+    }
+  }
+  return added;
+}
+async function calibrate(ids){
+  let ok=0,fail=0;
+  for(let i=0;i<ids.length;i++){
+    try{ const t=await getToken(ids[i]); addPaletteFromToken(t); ok++; }
+    catch(e){ fail++; }
+    if((i+1)%20===0) log(`校准 ${i+1}/${ids.length}，palette ${palette.size}/222`);
+    if(i%20===0) await sleep(20);
+  }
+  log(`校准完成：成功 ${ok}，失败 ${fail}，palette ${palette.size}/222`);
+}
+function scoreResult(generated, survivorOriginal){
+  let mismatch=0, unknown=0, unknownIndexes=new Set();
+  for(let p=0;p<576;p++){
+    const idx=generated[p], rgba=palette.get(idx);
+    if(!rgba){ unknown++; unknownIndexes.add(idx); continue; }
+    if(rgba!==hex4(survivorOriginal,p*4)) mismatch++;
+  }
+  return {mismatch, unknown, estimated:mismatch+unknown*0.5, confidence:1-unknown/576, unknownIndexes:[...unknownIndexes]};
+}
+async function analyzePairs(tokens){
+  const rows=[];
+  for(let i=0;i<tokens.length;i++){
+    for(let j=0;j<tokens.length;j++){
+      if(i===j) continue;
+      const s=tokens[i], d=tokens[j];
+      if(s.level!==d.level) continue;
+      const blended=blendEmb(s.embedding,d.embedding);
+      const gen=bytes(await C.model.renderEmbeddingPixels(blended));
+      const sc=scoreResult(gen,s.original);
+      const resultSlop = sc.unknown===0 ? sc.mismatch : sc.estimated;
+      rows.push({
+        survivor:s.id, donor:d.id, level:s.level, survivorSlop:s.slop, donorSlop:d.slop,
+        resultSlop, exact:sc.unknown===0, knownMismatch:sc.mismatch, unknown:sc.unknown, confidence:sc.confidence,
+        gross:resultSlop-s.slop, net:resultSlop-s.slop-d.slop, unknownIndexes:sc.unknownIndexes.join(" ")
+      });
+    }
+  }
+  rows.sort((a,b)=>(b.net??-99999)-(a.net??-99999)||(b.gross??-99999)-(a.gross??-99999)||(b.resultSlop??-99999)-(a.resultSlop??-99999));
+  return rows;
+}
+function renderTokens(tokens){
+  let html='<table><thead><tr><th>ID</th><th>Level</th><th>Slop</th><th>Source</th><th class="left">Owner</th><th class="left">Traits</th></tr></thead><tbody>';
+  for(const t of tokens) html+=`<tr><td>#${t.id}</td><td>L${t.level}</td><td>${t.slop}</td><td>${t.sourceId}</td><td class="left mono">${shortAddr(t.owner)}</td><td class="left">${t.attrs||""}</td></tr>`;
+  document.getElementById("tokens").innerHTML=html+'</tbody></table>';
+}
+function renderResults(rows){
+  if(!rows.length){ document.getElementById("summary").innerHTML='<p class="bad">没有可合成组合。最常见原因：你输入的 NFT 不是同 Level。</p>'; document.getElementById("results").innerHTML=''; return; }
+  const best=rows[0], exactCount=rows.filter(r=>r.exact).length;
+  document.getElementById("summary").innerHTML=`<p>最优方向：<span class="pill">Survivor #${best.survivor}</span> + <span class="pill">Donor #${best.donor}</span> → 预计 Slop <b>${fmt(best.resultSlop,1)}</b>，净增量 <b class="${best.net>=0?'good':'bad'}">${fmt(best.net,1)}</b>。</p><p class="small">精确组合 ${exactCount}/${rows.length}。如果不是 exact，烧之前去官方 Merge Lab 复核。</p>`;
+  let html='<table><thead><tr><th>排名</th><th>Survivor</th><th>Donor</th><th>L</th><th>结果Slop</th><th>毛增量</th><th>净增量</th><th>置信度</th><th>Unknown</th></tr></thead><tbody>';
+  rows.forEach((r,idx)=>{ html+=`<tr><td>${idx+1}</td><td>#${r.survivor}</td><td>#${r.donor}</td><td>L${r.level}</td><td>${fmt(r.resultSlop,1)} ${r.exact?'<span class="good">exact</span>':'<span class="warn">est</span>'}</td><td class="${r.gross>=0?'good':'bad'}">${fmt(r.gross,1)}</td><td class="${r.net>=0?'good':'bad'}">${fmt(r.net,1)}</td><td>${fmt(r.confidence*100,1)}%</td><td>${r.unknown}</td></tr>`; });
+  document.getElementById("results").innerHTML=html+'</tbody></table>';
+}
+async function run(){
+  latestRows=[]; latestTokens=[]; palette=new Map();
+  setStatus("启动中…");
+  try{
+    await setup();
+    const ids=parseIds(document.getElementById("ids").value);
+    previewIds();
+    log(`识别到编号：${ids.join(", ")}，共 ${ids.length} 个`);
+    if(ids.length<2) throw new Error("至少输入 2 个编号。");
+    const calibCount=Number(document.getElementById("calibCount").value||0);
+    const calibManual=parseIds(document.getElementById("calibIds").value);
+    const calibAuto=Array.from({length:Math.max(0,calibCount)},(_,i)=>i);
+    const calibIds=[...new Set([...ids,...calibManual,...calibAuto])];
+    log(`开始校准 palette：${calibIds.length} 个样本…`);
+    await calibrate(calibIds);
+    log("读取你的 token 数据…");
+    const tokens=[];
+    for(const id of ids){ try{ const t=await getToken(id); tokens.push(t); addPaletteFromToken(t); } catch(e){ log(`#${id} 读取失败：${e.shortMessage||e.message||String(e)}`); } }
+    latestTokens=tokens; renderTokens(tokens);
+    log(`有效 token：${tokens.map(t=>"#"+t.id+"(L"+t.level+", slop "+t.slop+")").join(" ")}`);
+    const levels=[...new Set(tokens.map(t=>t.level))];
+    log(`Level 分布：${levels.map(l=>"L"+l+"="+tokens.filter(t=>t.level===l).length).join(", ")}`);
+    latestRows=await analyzePairs(tokens);
+    renderResults(latestRows);
+    log("分析完成。");
+  }catch(e){ log("错误：" + (e.shortMessage||e.message||String(e))); }
+}
+function downloadCSV(){
+  if(!latestRows.length) return;
+  const fields=["survivor","donor","level","survivorSlop","donorSlop","resultSlop","exact","knownMismatch","unknown","confidence","gross","net","unknownIndexes"];
+  const lines=[fields.join(",")];
+  for(const r of latestRows) lines.push(fields.map(f=>JSON.stringify(r[f]??"")).join(","));
+  const blob=new Blob([lines.join("\n")],{type:"text/csv;charset=utf-8"});
+  const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download="slonks_direct_results.csv"; a.click(); URL.revokeObjectURL(url);
+}
+function clearCache(){ tokenCache.clear(); palette=new Map(); setStatus("缓存已清。"); }
+previewIds();
+</script>
+</body>
+</html>
