@@ -22,8 +22,23 @@ const b=h=>Array.from(ethers.getBytes(h)); const ss=u=>u>127?u-256:u; const uu=s
 let palette=new Map(); const hx=(arr,i)=>[arr[i],arr[i+1],arr[i+2],arr[i+3]].map(x=>x.toString(16).padStart(2,'0')).join(''); const isDiff=(m,p)=>(((m[Math.floor(p/8)]||0)>>(7-(p%8)))&1)===1;
 function score(gen,orig){let mm=0,unk=0;for(let p=0;p<576;p++){const rgba=palette.get(gen[p]);if(!rgba){unk++;continue;} if(rgba!==hx(orig,p*4))mm++;}return {mm,unk,res:unk?mm+unk*0.5:mm,exact:unk===0,conf:1-unk/576};}
 async function tk(id){
-  const sid=await cs.s.sourceIdFor(id);
-  const sl=await cs.r.diffPixelCount(id);
+  let sid, sl;
+  try{ sid=await cs.s.sourceIdFor(id); }
+  catch(e){
+    const msg=String(e?.shortMessage||e?.message||e);
+    if(msg.includes('CALL_EXCEPTION')||msg.includes('missing revert data')||msg.includes('revert')){
+      throw new Error(`#${id} sourceIdFor 读取失败（可能 token 不存在或合约不返回该ID）`);
+    }
+    throw e;
+  }
+  try{ sl=await cs.r.diffPixelCount(id); }
+  catch(e){
+    const msg=String(e?.shortMessage||e?.message||e);
+    if(msg.includes('CALL_EXCEPTION')||msg.includes('missing revert data')||msg.includes('revert')){
+      throw new Error(`#${id} diffPixelCount 读取失败（可能 token 不存在）`);
+    }
+    throw e;
+  }
   let level=0, levelFallback=false, embFallback=false;
   try{
     const lv=await cs.mg.mergeLevel(id);
@@ -58,7 +73,7 @@ function parseManual(){const t=document.getElementById('manualCsv').value.trim()
 function links(id,row){return `<a target=_blank href='https://opensea.io/assets/ethereum/${C}/${id}'>OpenSea</a> ${row.reservoir?`| <a target=_blank href='${row.reservoir}'>Reservoir</a>`:''}`}
 async function run(){setlog('正在读取 base token...'); latest=[]; palette=new Map();
 try{const baseId=Number(document.getElementById('baseTokenId').value);const maxC=Math.max(1,Number(document.getElementById('maxCandidates').value||100));const mp=document.getElementById('maxPriceEth').value.trim();const maxP=mp?Number(mp):null;const mode=document.getElementById('mode').value;
-const base=await tk(baseId);addPalette(base); log(`base level=${base.level}, slop=${base.slop}, sourceId=${base.sourceId}`); if(base.levelFallback) log('[fallback] base mergeLevel revert，按 L0 处理'); if(base.embFallback) log('[fallback] base mergeEmbedding revert，改用 sourceEmbedding');
+let base; try{ base=await tk(baseId); }catch(e){ throw new Error('base token 读取失败：'+(e?.message||e)); } addPalette(base); log(`base level=${base.level}, slop=${base.slop}, sourceId=${base.sourceId}`); if(base.levelFallback) log('[fallback] base mergeLevel revert，按 L0 处理'); if(base.embFallback) log('[fallback] base mergeEmbedding revert，改用 sourceEmbedding');
 log('正在获取 marketplace listings...'); let listings=[]; try{listings=await reservoirListings();log('已获取挂售 token: '+listings.length);}catch(e){log('Reservoir 失败: '+e.message); listings=parseManual(); if(!listings.length) throw new Error('Reservoir失败且未提供手动CSV'); log('改用手动CSV，条数: '+listings.length);} 
 if(maxP!==null) listings=listings.filter(x=>x.price_eth<=maxP); listings=listings.filter(x=>x.token_id!==baseId).slice(0,maxC);
 let candidates=[]; for(let i=0;i<listings.length;i++){try{const t=await tk(listings[i].token_id); if(t.levelFallback) log(`[fallback] #${t.id} mergeLevel revert，按 L0 处理`); if(t.embFallback) log(`[fallback] #${t.id} mergeEmbedding revert，改用 sourceEmbedding`); if(t.level===base.level) candidates.push({...listings[i],token:t});}catch(e){log(`跳过 #${listings[i].token_id}: ${e?.shortMessage||e?.message||e}`);} if((i+1)%10===0) log(`已读取候选 ${i+1}/${listings.length}`);} log('已筛选同level候选: '+candidates.length);
