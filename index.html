@@ -47,25 +47,31 @@ async function readSlopWithFallback(id){
     if(j?.attributes){ const v=parseSlopFromAttributes(j.attributes); if(v!==null) return {slop:v,source:'tokenURI',tokenUriErr,metaErr,diffErr}; }
   }catch(e){ tokenUriErr=String(e?.shortMessage||e?.message||e); }
   try{
-    const raw=await cs.r.attributesJSON(id);
-    const j=typeof raw==='string'?JSON.parse(raw):raw;
-    if(j?.attributes){ const v=parseSlopFromAttributes(j.attributes); if(v!==null) return {slop:v,source:'attributesJSON',tokenUriErr,metaErr,diffErr}; }
-  }catch(e){ metaErr=String(e?.shortMessage||e?.message||e); }
-  try{
-    const v=await cs.r.diffPixelCount(id);
+    const v=await cs.r.diffPixelCount(id,{from:C});
     return {slop:Number(v),source:'diffPixelCount',tokenUriErr,metaErr,diffErr};
   }catch(e){ diffErr=String(e?.shortMessage||e?.message||e); }
   return {slop:null,source:'',tokenUriErr,metaErr,diffErr};
 }
+
+async function readRendererBundle(id, sourceId){
+  try{
+    const rp=await cs.r.renderPixels(id,{from:C});
+    const dm=await cs.r.diffMask(id,{from:C});
+    const orig=await cs.r.originalPixelsForSource(sourceId,{from:C});
+    return {ok:true,rp:b(rp),dm:b(dm),orig:b(orig),err:''};
+  }catch(e){
+    return {ok:false,rp:[],dm:[],orig:[],err:String(e?.shortMessage||e?.message||e)};
+  }
+}
 async function tk(id){
   let owner='';
   try{ owner=await cs.s.ownerOf(id); }
-  catch(e){ throw new Error(`A_OWNEROF_FAIL #${id} token 不存在 / burned / 未 mint`); }
+  catch(e){ throw new Error(`A_OWNER_FAIL #${id} token 不存在 / burned / 未 mint`); }
 
   const slopRead=await readSlopWithFallback(id);
-  if(slopRead.tokenUriErr) log(`C_TOKENURI_FAIL #${id} metadata read failed: ${slopRead.tokenUriErr}`);
-  if(slopRead.metaErr) log(`C_TOKENURI_FAIL #${id} attributesJSON read failed: ${slopRead.metaErr}`);
-  if(slopRead.diffErr) log(`B_DIFFPIXELCOUNT_FAIL #${id} renderer slop read failed: ${slopRead.diffErr}`);
+  if(slopRead.tokenUriErr) log(`C_METADATA_FAIL #${id} metadata read failed: ${slopRead.tokenUriErr}`);
+  if(slopRead.metaErr) log(`C_METADATA_FAIL #${id} attributes parse failed: ${slopRead.metaErr}`);
+  if(slopRead.diffErr) log(`B_RENDERER_DIRECT_CALL_FAIL #${id} renderer slop read failed: ${slopRead.diffErr}`);
 
   const sid=await cs.s.sourceIdFor(id);
   let level=0, levelFallback=false, embFallback=false;
@@ -73,8 +79,9 @@ async function tk(id){
   let embedding;
   if(level===0) embedding=await cs.m.sourceEmbedding(sid);
   else{ try{ embedding=await cs.mg.mergeEmbedding(id);}catch(e){ embedding=await cs.m.sourceEmbedding(sid); embFallback=true; }}
-  const [rp,dm,orig]=await Promise.all([cs.r.renderPixels(id),cs.r.diffMask(id),cs.r.originalPixelsForSource(sid)]);
-  return {id,owner,sourceId:Number(sid),level,slop:slopRead.slop,slopSource:slopRead.source,slopReadable:slopRead.slop!==null,embedding,renderPixels:b(rp),diffMask:b(dm),original:b(orig),levelFallback,embFallback};
+
+  const rb=await readRendererBundle(id,sid);
+  return {id,owner,sourceId:Number(sid),level,slop:slopRead.slop,slopSource:slopRead.source,slopReadable:slopRead.slop!==null,embedding,renderOk:rb.ok,renderPixels:rb.rp,diffMask:rb.dm,original:rb.orig,renderErr:rb.err,levelFallback,embFallback};
 }
 function addPalette(t){for(let p=0;p<576;p++) if(!isDiff(t.diffMask,p)) palette.set(t.renderPixels[p],hx(t.original,p*4));}
 async function reservoirListings(){const u='https://api.reservoir.tools/orders/asks/v5?contracts='+C+'&status=active&sortBy=price&limit=200'; const r=await fetch(u,{headers:{'accept':'*/*'}}); if(!r.ok) throw new Error('Reservoir HTTP '+r.status); const j=await r.json(); const arr=(j.orders||[]).map(o=>({token_id:Number((o.criteria?.data?.token?.tokenId)||o.token?.tokenId),price_eth:Number(o.price?.amount?.decimal),marketplace:o.source?.name||'',url:o.source?.url||o.sourceUrl||'',reservoir:o.id?`https://reservoir.tools/ethereum/asset/${C}/${o.criteria?.data?.token?.tokenId}`:''})).filter(x=>Number.isInteger(x.token_id)&&x.price_eth>0); return arr;}
@@ -82,10 +89,10 @@ function parseManual(){const t=document.getElementById('manualCsv').value.trim()
 function links(id,row){return `<a target=_blank href='https://opensea.io/assets/ethereum/${C}/${id}'>OpenSea</a> ${row.reservoir?`| <a target=_blank href='${row.reservoir}'>Reservoir</a>`:''}`}
 async function run(){setlog('正在读取 base token...'); latest=[]; palette=new Map();
 try{const baseId=Number(document.getElementById('baseTokenId').value);const maxC=Math.max(1,Number(document.getElementById('maxCandidates').value||100));const mp=document.getElementById('maxPriceEth').value.trim();const maxP=mp?Number(mp):null;const mode=document.getElementById('mode').value;
-let base; try{ base=await tk(baseId); }catch(e){ throw new Error('base token 读取失败：'+(e?.message||e)); } if(!base.slopReadable){ throw new Error('base token 存在，但 slop 读取失败，请用官方 Merge Lab 复核。'); } addPalette(base); log(`base level=${base.level}, slop=${base.slop}, sourceId=${base.sourceId}`); if(base.levelFallback) log('[fallback] base mergeLevel revert，按 L0 处理'); if(base.embFallback) log('[fallback] base mergeEmbedding revert，改用 sourceEmbedding');
+let base; try{ base=await tk(baseId); }catch(e){ throw new Error('base token 读取失败：'+(e?.message||e)); } if(!base.slopReadable){ throw new Error('base token 存在，但 metadata/slop 读取失败，请用官方 Merge Lab 复核。'); } if(!base.renderOk){ throw new Error('base token 存在，但 renderer helper 读取失败（可能 caller 限制），请用官方 Merge Lab 复核。'); } addPalette(base); log(`base level=${base.level}, slop=${base.slop}, sourceId=${base.sourceId}`); if(base.levelFallback) log('[fallback] base mergeLevel revert，按 L0 处理'); if(base.embFallback) log('[fallback] base mergeEmbedding revert，改用 sourceEmbedding');
 log('正在获取 marketplace listings...'); let listings=[]; try{listings=await reservoirListings();log('已获取挂售 token: '+listings.length);}catch(e){log('Reservoir 失败: '+e.message); listings=parseManual(); if(!listings.length) throw new Error('Reservoir失败且未提供手动CSV'); log('改用手动CSV，条数: '+listings.length);} 
 if(maxP!==null) listings=listings.filter(x=>x.price_eth<=maxP); listings=listings.filter(x=>x.token_id!==baseId).slice(0,maxC);
-let candidates=[]; for(let i=0;i<listings.length;i++){try{const t=await tk(listings[i].token_id); if(t.levelFallback) log(`[fallback] #${t.id} mergeLevel revert，按 L0 处理`); if(t.embFallback) log(`[fallback] #${t.id} mergeEmbedding revert，改用 sourceEmbedding`); if(!t.slopReadable){ log(`跳过 #${t.id}: 该 token 存在，但 slop 读取失败，请用官方 Merge Lab 复核。`); } else if(t.level===base.level) candidates.push({...listings[i],token:t});}catch(e){log(`跳过 #${listings[i].token_id}: ${e?.shortMessage||e?.message||e}`);} if((i+1)%10===0) log(`已读取候选 ${i+1}/${listings.length}`);} log('已筛选同level候选: '+candidates.length);
+let candidates=[]; for(let i=0;i<listings.length;i++){try{const t=await tk(listings[i].token_id); if(t.levelFallback) log(`[fallback] #${t.id} mergeLevel revert，按 L0 处理`); if(t.embFallback) log(`[fallback] #${t.id} mergeEmbedding revert，改用 sourceEmbedding`); if(!t.slopReadable){ log(`跳过 #${t.id}: token 存在，但 metadata/slop 读取失败`); } else if(!t.renderOk){ log(`跳过 #${t.id}: B_RENDERER_DIRECT_CALL_FAIL renderer helper读取失败，可能 caller 限制`);} else if(t.level===base.level) candidates.push({...listings[i],token:t});}catch(e){log(`跳过 #${listings[i].token_id}: ${e?.shortMessage||e?.message||e}`);} if((i+1)%10===0) log(`已读取候选 ${i+1}/${listings.length}`);} log('已筛选同level候选: '+candidates.length);
 let done=0; for(const c of candidates){for(const dir of (mode==='both'?[0,1]:[0])){const survivor=dir===0?base:c.token, donor=dir===0?c.token:base; const sc=score(b(await cs.m.renderEmbeddingPixels(blend(survivor.embedding,donor.embedding))),survivor.original); const resultSlop=sc.res; const gross=resultSlop-survivor.slop, net=resultSlop-survivor.slop-donor.slop, pe=c.price_eth||0; latest.push({baseTokenId:baseId,candidateTokenId:c.token_id,priceEth:pe,marketplace:c.marketplace,baseLevel:base.level,baseSlop:base.slop,donorSlop:donor.slop,resultSlop,grossDelta:gross,netDelta:net,grossSlopPerEth:pe?gross/pe:null,netSlopPerEth:pe?net/pe:null,opensea:`https://opensea.io/assets/ethereum/${C}/${c.token_id}`,reservoir:c.reservoir||c.url,confidence:sc.exact?'exact':'estimated',reverse:dir===1}); done++; if(done%10===0)log('已模拟组合: '+done);}}
 latest.sort((a,b)=>(b.netSlopPerEth??-1e9)-(a.netSlopPerEth??-1e9)||(b.grossSlopPerEth??-1e9)-(a.grossSlopPerEth??-1e9)||(b.resultSlop??-1e9)-(a.resultSlop??-1e9)||(a.priceEth??1e9)-(b.priceEth??1e9));
 render(); log('完成。');}catch(e){log('错误: '+e.message)} }
