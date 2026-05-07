@@ -1,69 +1,72 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse,base64,csv,json,re,time,sys
+import argparse,base64,csv,json,re,time
 from pathlib import Path
 import requests
 from playwright.sync_api import sync_playwright
 
-RPC='https://eth.llamarpc.com'
 SLONKS='0x832233ddb7bcffd0ed53127dd6be3f1aa5845108'
 MERGE='0x3e5bb2a724dBe9a6afE04ae7581639367693F51c'
+RPC_POOL=['https://eth.llamarpc.com','https://ethereum.publicnode.com','https://rpc.ankr.com/eth']
 BLOCK=re.compile(r"merge|wallet|connect|approve|confirm|transaction",re.I)
 
 
-def keccak4(sig:str)->str:
-    import hashlib
-    return hashlib.sha3_256(sig.encode()).hexdigest()[:8]
+def log(msg,debug=False):
+    if debug: print(msg,flush=True)
 
 def pad64(n:int)->str: return hex(n)[2:].rjust(64,'0')
 
-def eth_call(to,data):
-    p={"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}
+class RpcClient:
+    def __init__(self, primary:str, timeout:tuple[int,int], debug=False):
+        self.rpcs=[primary]+[x for x in RPC_POOL if x!=primary]
+        self.i=0; self.timeout=timeout; self.debug=debug; self.fail_streak=0
+    @property
+    def rpc(self): return self.rpcs[self.i]
+    def rotate(self):
+        if self.i+1>=len(self.rpcs): return False
+        self.i+=1; self.fail_streak=0
+        print(f"[rpc] switched to {self.rpc}")
+        return True
+    def call(self,to,data):
+        p={"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}
+        try:
+            r=requests.post(self.rpc,json=p,timeout=self.timeout)
+            if r.status_code!=200: raise RuntimeError(f"API_FAIL HTTP {r.status_code}: {r.text[:300]}")
+            j=r.json()
+            if 'error' in j: raise RuntimeError(j['error'].get('message','eth_call error'))
+            self.fail_streak=0
+            return j.get('result','0x')
+        except Exception as e:
+            self.fail_streak+=1
+            raise RuntimeError(str(e))
+
+def owner_check(rc:RpcClient, tid:int):
     try:
-        resp=requests.post(RPC,json=p,timeout=20)
+        out=rc.call(SLONKS,'0x6352211e'+pad64(tid)); return 'ok',out
     except Exception as e:
-        raise RuntimeError(f"API_FAIL network: {e}")
-    if resp.status_code!=200:
-        raise RuntimeError(f"API_FAIL HTTP {resp.status_code}: {resp.text[:300]}")
-    try:r=resp.json()
-    except Exception:
-        raise RuntimeError(f"API_FAIL non-json: {resp.text[:300]}")
-    if 'error' in r: raise RuntimeError(r['error'].get('message','eth_call error'))
-    return r.get('result','0x')
+        m=str(e)
+        if 'revert' in m.lower() or 'execution reverted' in m.lower(): return 'owner_fail',m
+        return 'rpc_timeout',m
 
-def owner_check(tid:int):
-    try:
-        out=eth_call(SLONKS,'0x6352211e'+pad64(tid))
-        return True,out,''
-    except Exception as e:
-        msg=str(e)
-        if 'execution reverted' in msg or 'revert' in msg or 'OWNER_FAIL' in msg:
-            return False,'',f'OWNER_FAIL {msg}'
-        return None,'',f'API_FAIL {msg}'
+def merge_level(rc:RpcClient, tid:int):
+    try: return int(rc.call(MERGE,'0x2f17a224'+pad64(tid)),16)
+    except: return 0
 
-def merge_level(tid:int)->int:
-    try:
-        out=eth_call(MERGE,'0x2f17a224'+pad64(tid))
-        return int(out,16)
-    except:
-        return 0
-
-def token_uri(tid:int)->str:
-    out=eth_call(SLONKS,'0xc87b56dd'+pad64(tid))
-    h=out[2:]
-    ln=int(h[64:128],16); st=128
+def token_uri(rc:RpcClient, tid:int):
+    out=rc.call(SLONKS,'0xc87b56dd'+pad64(tid)); h=out[2:]; ln=int(h[64:128],16); st=128
     return bytes.fromhex(h[st:st+ln*2]).decode(errors='ignore')
 
-def slop_from_tokenuri(tid:int):
+def slop_from_tokenuri(rc:RpcClient, tid:int):
     try:
-        uri=token_uri(tid)
+        uri=token_uri(rc,tid)
         if uri.startswith('data:application/json;base64,'):
             j=json.loads(base64.b64decode(uri.split(',',1)[1]).decode())
             for a in j.get('attributes',[]):
                 if str(a.get('trait_type','')).strip().lower() in {'slop','pixel diff','diff','difference'}:
                     return float(a.get('value'))
-    except: pass
-    return None
+        return None
+    except Exception:
+        return None
 
 def safe_preview_btn(page):
     opts=[page.get_by_text('Preview',exact=False),page.locator("button:has-text('Preview')"),page.locator("button:has-text('Simulate')"),page.get_by_role('button',name=re.compile(r'preview|simulate|no\s*-?\s*gas',re.I))]
@@ -72,99 +75,130 @@ def safe_preview_btn(page):
         for i in range(o.count()):
             b=o.nth(i); t=(b.inner_text(timeout=800) or '').strip()
             if not BLOCK.search(t): return b
-    raise RuntimeError('preview button not found')
+    raise RuntimeError('PREVIEW_FAIL preview button not found')
 
-def fill_pair(page,survivor,donor):
-    inputs=page.locator('input')
-    if inputs.count()<2: raise RuntimeError('not enough inputs for keep/burn')
-    inputs.nth(0).fill(str(survivor)); inputs.nth(1).fill(str(donor))
-
-def read_result(page):
-    end=time.time()+10
+def read_result(page, timeout_s=10):
+    end=time.time()+timeout_s
     while time.time()<end:
         for loc in [page.locator(r"text=/result\s*slop/i"),page.locator(r"text=/slop/i")]:
             if loc.count()==0: continue
-            txt=loc.first.inner_text(timeout=1200)
-            m=re.findall(r"[-+]?\d+(?:\.\d+)?",txt)
+            txt=loc.first.inner_text(timeout=1200); m=re.findall(r"[-+]?\d+(?:\.\d+)?",txt)
             if m: return float(m[-1])
-        time.sleep(0.5)
-    raise RuntimeError('result slop not found')
+        time.sleep(0.4)
+    raise RuntimeError('PREVIEW_FAIL result slop not found')
+
+def load_candidates_csv(path:Path):
+    out=[]
+    for r in csv.DictReader(path.open('r',encoding='utf-8',newline='')):
+        out.append({'token_id':int(r['token_id']),'price_eth':r.get('price_eth',''),'url':r.get('url',''),'marketplace':r.get('marketplace','')})
+    return out
 
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--base',type=int,required=True)
-    ap.add_argument('--max-candidates',type=int,default=100)
+    ap.add_argument('--rpc',default='https://eth.llamarpc.com')
+    ap.add_argument('--timeout',type=int,default=10)
+    ap.add_argument('--max-candidates',type=int,default=20)
+    ap.add_argument('--start-id',type=int,default=0)
+    ap.add_argument('--end-id',type=int,default=9999)
     ap.add_argument('--full-scan',action='store_true')
+    ap.add_argument('--candidates')
+    ap.add_argument('--allow-reverse',action='store_true')
+    ap.add_argument('--debug',action='store_true')
     ap.add_argument('--headful',action='store_true')
     ap.add_argument('--keep-open',action='store_true')
     args=ap.parse_args()
 
-    print(f'[debug] checking base token id={args.base}')
-    print(f'[debug] RPC URL={RPC}')
-    ok,owner_raw,err=owner_check(args.base)
-    print(f'[debug] ownerOf raw={owner_raw}')
-    if ok is False: raise SystemExit(f'OWNER_FAIL = token 不存在 / burned / 未 mint; detail: {err}')
-    if ok is None: raise SystemExit(f'API_FAIL = API 请求失败; detail: {err}')
-    base_level=merge_level(args.base)
-    base_slop=slop_from_tokenuri(args.base)
-    if base_slop is None: print('METADATA_FAIL base slop read failed from tokenURI; continue with preview-only mode')
+    rc=RpcClient(args.rpc,(5,args.timeout),args.debug)
+    print(f"[debug] checking base token id={args.base}")
+    print(f"[debug] using RPC={rc.rpc}")
+    st,detail=owner_check(rc,args.base)
+    print(f"[debug] ownerOf result status={st} detail={detail}")
+    if st=='owner_fail': raise SystemExit('OWNER_FAIL = token 不存在 / burned / 未 mint')
+    if st!='ok': raise SystemExit(f'API_FAIL = API 请求失败: {detail}')
 
-    scan_rows=[]; cands=[]
-    for tid in range(10000):
-        if tid==args.base: continue
-        ok2,_,err2=owner_check(tid)
-        if ok2 is False:
-            scan_rows.append({'token_id':tid,'status':'skip','note':'OWNER_FAIL token not exists/burned'}); continue
-        if ok2 is None:
-            scan_rows.append({'token_id':tid,'status':'skip','note':f'API_FAIL {err2}'}); continue
-        lv=merge_level(tid)
-        if lv!=base_level:
-            scan_rows.append({'token_id':tid,'status':'skip','note':f'level {lv} != {base_level}'}); continue
-        ds=slop_from_tokenuri(tid)
-        if ds is None:
-            scan_rows.append({'token_id':tid,'status':'skip','note':'donor slop read failed'}); continue
-        cands.append((tid,ds)); scan_rows.append({'token_id':tid,'status':'candidate','note':'ok'})
-        if not args.full_scan and len(cands)>=args.max_candidates: break
+    base_level=merge_level(rc,args.base)
+    base_slop=slop_from_tokenuri(rc,args.base)
+    if base_slop is None: print('METADATA_FAIL base slop read failed; preview-only mode')
+
+    scan_rows=[]; candidates=[]; rpc_errors=0; last_progress=time.time(); valid=same=0
+    if args.candidates:
+        candidates=load_candidates_csv(Path(args.candidates))
+        scan_rows.append({'token_id':args.base,'status':'info','note':f'using candidates csv: {args.candidates}'})
+    else:
+        for tid in range(args.start_id,args.end_id+1):
+            if tid==args.base: continue
+            if time.time()-last_progress>60:
+                print('scan timed out, try another RPC or smaller range'); break
+            st,detail=owner_check(rc,tid)
+            if st=='rpc_timeout':
+                rpc_errors+=1; scan_rows.append({'token_id':tid,'status':'rpc_timeout','note':detail})
+            elif st=='owner_fail':
+                scan_rows.append({'token_id':tid,'status':'owner_fail','note':'token may be burned/unminted'})
+            else:
+                valid+=1
+                lv=merge_level(rc,tid)
+                if lv==base_level:
+                    same+=1
+                    ds=slop_from_tokenuri(rc,tid)
+                    candidates.append({'token_id':tid,'price_eth':'','url':'','marketplace':'','donor_slop':ds})
+                    scan_rows.append({'token_id':tid,'status':'same_level','note':f'level={lv}'})
+                    last_progress=time.time()
+                    if (not args.full_scan) and len(candidates)>=args.max_candidates: break
+                else:
+                    scan_rows.append({'token_id':tid,'status':'skip_level','note':f'level {lv} != {base_level}'})
+            if tid%10==0:
+                print(f"scanned {tid-args.start_id+1} / valid {valid} / same_level {same} / rpc_errors {rpc_errors}")
+            if rc.fail_streak>=20 and not rc.rotate():
+                print('all RPC endpoints failed; stopping scan'); break
 
     results=[]
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=not args.headful)
         page=browser.new_page(); page.goto('https://slonks.xyz/merge-lab',wait_until='domcontentloaded',timeout=90000)
-        for tid,donor_slop in cands:
+        for c in candidates:
+            donor=c['token_id']; log(f"[preview] donor={donor}",args.debug)
             try:
-                fill_pair(page,args.base,tid)
-                safe_preview_btn(page).click(timeout=3000)
-                rs=read_result(page)
-                gross=(rs-base_slop) if base_slop is not None else ''
-                net=(rs-base_slop-donor_slop) if (base_slop is not None and donor_slop is not None) else ''
-                results.append({'base_id':args.base,'donor_id':tid,'base_slop':base_slop,'donor_slop':donor_slop,'result_slop':rs,'gross_delta':gross,'net_delta':net})
-                scan_rows.append({'token_id':tid,'status':'preview_ok','note':f'result_slop={rs}'})
+                ins=page.locator('input')
+                if ins.count()<2: raise RuntimeError('PREVIEW_FAIL keep/burn input not found')
+                ins.nth(0).fill(str(args.base)); ins.nth(1).fill(str(donor))
+                btn=safe_preview_btn(page)
+                if not btn.is_enabled(): raise RuntimeError('PREVIEW_FAIL preview button disabled')
+                btn.click(timeout=3000)
+                rs=read_result(page,args.timeout)
+                ds=c.get('donor_slop')
+                gd=(rs-base_slop) if base_slop is not None else ''
+                nd=(rs-base_slop-ds) if (base_slop is not None and ds is not None) else ''
+                pe=float(c['price_eth']) if str(c.get('price_eth','')).strip() else None
+                gpe=(gd/pe) if isinstance(gd,(int,float)) and pe and pe>0 else ''
+                npe=(nd/pe) if isinstance(nd,(int,float)) and pe and pe>0 else ''
+                results.append({'survivor_id':args.base,'donor_id':donor,'base_slop':base_slop,'donor_slop':ds,'result_slop':rs,'gross_delta':gd,'net_delta':nd,'price_eth':c.get('price_eth',''),'gross_slop_per_eth':gpe,'net_slop_per_eth':npe,'status':'ok','note':''})
             except Exception as e:
-                scan_rows.append({'token_id':tid,'status':'error','note':'PREVIEW_FAIL '+str(e)})
-        if args.keep_open:
-            input('Press Enter to close browser...')
+                results.append({'survivor_id':args.base,'donor_id':donor,'base_slop':base_slop,'donor_slop':c.get('donor_slop'),'result_slop':'','gross_delta':'','net_delta':'','price_eth':c.get('price_eth',''),'gross_slop_per_eth':'','net_slop_per_eth':'','status':'preview_error','note':str(e)})
+        if args.keep_open: input('Press Enter to close browser...')
         browser.close()
 
-    def k(r):
+    def rk(r):
         n=r['net_delta'] if isinstance(r['net_delta'],(int,float)) else -1e18
         g=r['gross_delta'] if isinstance(r['gross_delta'],(int,float)) else -1e18
-        return (n,g,r['result_slop'])
-    results.sort(key=k,reverse=True)
+        return (n,g,r['result_slop'] if isinstance(r['result_slop'],(int,float)) else -1e18)
+    results.sort(key=rk,reverse=True)
+
     with Path('ranked_results.csv').open('w',newline='',encoding='utf-8') as f:
-        w=csv.DictWriter(f,fieldnames=['base_id','donor_id','base_slop','donor_slop','result_slop','gross_delta','net_delta']);w.writeheader();w.writerows(results)
+        fn=['survivor_id','donor_id','base_slop','donor_slop','result_slop','gross_delta','net_delta','price_eth','gross_slop_per_eth','net_slop_per_eth','status','note']
+        w=csv.DictWriter(f,fieldnames=fn); w.writeheader(); w.writerows(results)
     with Path('scan_log.csv').open('w',newline='',encoding='utf-8') as f:
-        w=csv.DictWriter(f,fieldnames=['token_id','status','note']);w.writeheader();w.writerows(scan_rows)
-    if results:
-        top=results[0]
-        Path('best_merge.txt').write_text(
-            f"base survivor id: {top['base_id']}\n"
-            f"donor id: {top['donor_id']}\n"
-            f"base slop: {top['base_slop']}\n"
-            f"donor slop: {top['donor_slop']}\n"
-            f"result slop: {top['result_slop']}\n"
-            f"gross delta: {top['gross_delta']}\n"
-            f"net delta: {top['net_delta']}\n",encoding='utf-8')
-        print('Top10:')
-        for i,r in enumerate(results[:10],1): print(i,r)
+        w=csv.DictWriter(f,fieldnames=['token_id','status','note']); w.writeheader(); w.writerows(scan_rows)
+
+    valid=[r for r in results if r['status']=='ok']
+    if not valid:
+        print('No valid preview results. Check scan_log.csv and ranked_results.csv')
+        Path('best_merge.txt').write_text('No valid result\n',encoding='utf-8')
+        return
+    top=valid[0]
+    Path('best_merge.txt').write_text(
+        f"Survivor: {top['survivor_id']}\nDonor: {top['donor_id']}\nBase slop: {top['base_slop']}\nDonor slop: {top['donor_slop']}\nResult slop: {top['result_slop']}\nGross delta: {top['gross_delta']}\nNet delta: {top['net_delta']}\nGross slop/ETH: {top['gross_slop_per_eth']}\nNet slop/ETH: {top['net_slop_per_eth']}\n",encoding='utf-8')
+    print('Top10:')
+    for i,r in enumerate(valid[:10],1): print(i,r)
 
 if __name__=='__main__': main()
