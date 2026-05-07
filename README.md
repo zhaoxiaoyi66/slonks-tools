@@ -1,17 +1,16 @@
-# Slonks minimal merge tools
+# Slonks local simulator (no Playwright)
 
-先打通单组 preview：
-`python slonks_pair_preview.py --survivor 1139 --donor 583 --manual --headful --keep-open`
+单组验证：
+`python slonks_local_simulator.py --pair 1139 583`
 
-自动单组：
-`python slonks_pair_preview.py --survivor 1139 --donor 583 --debug --headful --keep-open`
-
-批量同级（不含市场/价格）：
-`python slonks_find_best_merge.py --base 1139 --start-id 0 --end-id 200 --max-candidates 20 --debug`
+批量同级：
+`python slonks_local_simulator.py --base 1139 --start-id 0 --end-id 500 --max-candidates 50`
 
 输出：
-- `pair_preview_result.csv`
 - `ranked_results.csv`
-- `scan_log.csv`
 - `best_merge.txt`
-- `screenshots/`
+- `scan_log.csv`
+- `palette.json`
+- `token_cache.json`
+
+仅使用 `eth_call/view`，不连接钱包，不发送交易。
