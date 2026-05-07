@@ -16,20 +16,21 @@ class Rpc:
     def switch(self):
         if self.i+1>=len(self.rpcs): return False
         self.i+=1; self.fail=0; print(f'[rpc] switched -> {self.url}',flush=True); return True
-    def call(self,to,data):
+    def call(self,to,data,retry=True):
         p={"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}
         try:
             r=requests.post(self.url,json=p,timeout=(5,self.timeout))
             if r.status_code==429:
-                time.sleep(5+random.random()*5); raise RuntimeError('429')
+                time.sleep(5); raise RuntimeError('429')
             r.raise_for_status(); j=r.json()
             if 'error' in j: raise RuntimeError(j['error'].get('message','err'))
             self.fail=0; return j['result']
         except Exception as e:
             self.fail+=1
             if self.debug: print('[rpc-error]',self.url,e,flush=True)
+            if retry: time.sleep(5)
             if self.fail>=10 and self.switch():
-                return self.call(to,data)
+                return self.call(to,data,retry=False)
             raise
 
 def pad64(n): return hex(n)[2:].rjust(64,'0')
@@ -51,40 +52,58 @@ def token_info(rpc,tid):
         except: emb=b(rpc.call(ADDR['model'],'0x'+SEL['sourceEmbedding']+pad64(src))); lv=0
     return {'token_id':tid,'owner':owner,'source_id':src,'level':lv,'embedding':emb.hex()}
 
-def build_palette(rpc,start,end,out_file):
+def save_palette_state(palette,state):
+    Path('palette.json').write_text(json.dumps(palette,indent=2))
+    Path('palette_build_state.json').write_text(json.dumps(state,indent=2))
+
+def build_palette(rpc,start,end,resume,max_samples,sleep_sec):
+    palette=json.loads(Path('palette.json').read_text()) if Path('palette.json').exists() else {}
+    state={'last_token':start-1,'scanned':0,'skipped':0,'rpc_errors':0}
+    if resume and Path('palette_build_state.json').exists():
+        state=json.loads(Path('palette_build_state.json').read_text())
+        start=max(start,int(state.get('last_token',start-1))+1)
+    scanned=state.get('scanned',0); skipped=state.get('skipped',0); errs=state.get('rpc_errors',0)
+    samples=0
     print('building palette',flush=True)
-    pal={}
-    total=max(1,end-start+1)
-    for i,tid in enumerate(range(start,end+1),1):
-        if i%20==0: print(f'palette progress {i}/{total}',flush=True)
+    for tid in range(start,end+1):
+        if max_samples and samples>=max_samples: break
+        samples+=1; scanned+=1
         try:
             src=int(rpc.call(ADDR['slonks'],'0x'+SEL['sourceIdFor']+pad64(tid)),16)
             rp=b(rpc.call(ADDR['renderer'],'0x'+SEL['renderPixels']+pad64(tid)))
             dm=b(rpc.call(ADDR['renderer'],'0x'+SEL['diffMask']+pad64(tid)))
             og=b(rpc.call(ADDR['renderer'],'0x'+SEL['originalPixelsForSource']+pad64(src)))
+            changed=False
             for p in range(576):
-                if not is_diff(dm,p): pal.setdefault(rp[p],rgba(og,p).hex())
-            if len(pal)>=222: break
-        except: pass
-        time.sleep(0.25)
-    Path(out_file).write_text(json.dumps({str(k):v for k,v in pal.items()},indent=2))
-    print(f'palette completed size={len(pal)}',flush=True)
+                if not is_diff(dm,p):
+                    idx=str(rp[p])
+                    if idx not in palette:
+                        palette[idx]=rgba(og,p).hex(); changed=True
+            state.update({'last_token':tid,'scanned':scanned,'skipped':skipped,'rpc_errors':errs})
+            if changed: save_palette_state(palette,state)
+            if len(palette)>=222:
+                save_palette_state(palette,state); print('palette completed',flush=True); return palette
+        except Exception:
+            errs+=1; skipped+=1
+            state.update({'last_token':tid,'scanned':scanned,'skipped':skipped,'rpc_errors':errs})
+            save_palette_state(palette,state)
+        if scanned%10==0:
+            print(f"palette progress scanned={scanned} known={len(palette)}/222 skipped={skipped} rpc_errors={errs}",flush=True)
+        time.sleep(sleep_sec)
+    save_palette_state(palette,state)
+    return palette
 
 def simulate_pair(rpc,survivor,donor,palette):
-    print('simulating pair',flush=True)
     s=token_info(rpc,survivor); d=token_info(rpc,donor)
     if s['level']!=d['level']: return None,'not_same_level'
     emb=blend(bytes.fromhex(s['embedding']),bytes.fromhex(d['embedding']))
     out=rpc.call(ADDR['model'],'0x'+SEL['renderEmbeddingPixels']+pad64(32)+pad64(len(emb))+emb.hex().ljust(((len(emb)+31)//32)*64,'0'))
     gen=b(out); og=b(rpc.call(ADDR['renderer'],'0x'+SEL['originalPixelsForSource']+pad64(s['source_id'])))
     pal={int(k):bytes.fromhex(v) for k,v in palette.items()}
-    miss=0; diff=0
+    diff=0
     for p in range(576):
-        c=pal.get(gen[p])
-        if c is None: miss+=1
-        elif c!=rgba(og,p): diff+=1
-    rs=diff if miss==0 else diff+miss*0.5
-    return {'survivor_id':survivor,'donor_id':donor,'base_source_id':s['source_id'],'donor_source_id':d['source_id'],'level':s['level'],'result_slop':rs,'status':'ok' if miss==0 else 'est','note':f'unknown_palette={miss}'},None
+        if pal[gen[p]]!=rgba(og,p): diff+=1
+    return {'survivor_id':survivor,'donor_id':donor,'base_source_id':s['source_id'],'donor_source_id':d['source_id'],'level':s['level'],'result_slop':diff,'status':'ok','note':''},None
 
 def main():
     print('starting slonks_local_simulator',flush=True)
@@ -93,33 +112,32 @@ def main():
     ap.add_argument('--base',type=int)
     ap.add_argument('--build-palette',action='store_true')
     ap.add_argument('--start-id',type=int,default=0)
-    ap.add_argument('--end-id',type=int,default=1000)
+    ap.add_argument('--end-id',type=int,default=500)
     ap.add_argument('--max-candidates',type=int,default=100)
     ap.add_argument('--timeout',type=int,default=10)
     ap.add_argument('--rpc',default='https://ethereum.publicnode.com')
+    ap.add_argument('--resume',action='store_true')
+    ap.add_argument('--max-samples',type=int,default=0)
+    ap.add_argument('--sleep',type=float,default=0.25)
     ap.add_argument('--debug',action='store_true')
-    a=ap.parse_args()
+    a=ap.parse_args(); rpc=Rpc(a.rpc,a.timeout,a.debug)
 
-    rpc=Rpc(a.rpc,a.timeout,a.debug)
-    pal_file='palette.json'
     if a.build_palette:
-        build_palette(rpc,a.start_id,a.end_id,pal_file); return
+        pal=build_palette(rpc,a.start_id,a.end_id,a.resume,a.max_samples,a.sleep)
+        print(f'palette size={len(pal)}',flush=True); return
 
     print('loading palette.json',flush=True)
-    if not Path(pal_file).exists():
-        print('palette.json missing or incomplete; run --build-palette first or use better RPC',flush=True); sys.exit(1)
-    pal=json.loads(Path(pal_file).read_text())
-    if len(pal)<180:
-        print('palette.json missing or incomplete; run --build-palette first or use better RPC',flush=True); sys.exit(1)
+    if not Path('palette.json').exists():
+        print('palette.json missing; run --build-palette first',flush=True); sys.exit(1)
+    pal=json.loads(Path('palette.json').read_text())
+    if len(pal)<222:
+        print(f'palette incomplete: {len(pal)}/222 colors',flush=True); sys.exit(1)
 
     if a.pair:
         s,d=a.pair; print(f'mode=pair survivor={s} donor={d}',flush=True)
-        try:
-            r,e=simulate_pair(rpc,s,d,pal)
-            if e: print('status=error note=',e,flush=True)
-            else: print(f'survivor={s} donor={d} result_slop={r["result_slop"]}',flush=True)
-        except Exception as ex:
-            print('fatal error:',ex,flush=True); sys.exit(1)
+        r,e=simulate_pair(rpc,s,d,pal)
+        if e: print('status=error note=',e,flush=True)
+        else: print(f'survivor={s} donor={d} result_slop={r["result_slop"]}',flush=True)
         return
 
     if a.base is None: raise SystemExit('need --pair or --base')
@@ -132,7 +150,7 @@ def main():
             if info['level']!=b['level']: logs.append({'token_id':tid,'status':'not_same_level','note':''}); continue
             r,e=simulate_pair(rpc,a.base,tid,pal)
             if e: logs.append({'token_id':tid,'status':'error','note':e}); continue
-            results.append(r); logs.append({'token_id':tid,'status':'ok','note':r['note']})
+            results.append(r); logs.append({'token_id':tid,'status':'ok','note':''})
             if len(results)>=a.max_candidates: break
         except Exception as ex:
             logs.append({'token_id':tid,'status':'rpc_fail','note':str(ex)})

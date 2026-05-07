@@ -1,15 +1,18 @@
 # Slonks local simulator (RPC only)
 
-第一次先构建 palette：
-`python slonks_local_simulator.py --build-palette --rpc https://ethereum.publicnode.com`
+第一步（先构建 palette，可恢复）：
+`python slonks_local_simulator.py --build-palette --start-id 0 --end-id 500 --resume --rpc https://ethereum.publicnode.com`
 
-然后测试单组：
+第二步（单组验证）：
 `python slonks_local_simulator.py --pair 1139 583 --rpc https://ethereum.publicnode.com`
 
 批量同级：
 `python slonks_local_simulator.py --base 1139 --start-id 0 --end-id 500 --max-candidates 50 --rpc https://ethereum.publicnode.com`
 
-如果报 palette 缺失：
-`palette.json missing or incomplete; run --build-palette first or use better RPC`
+如果报：
+`palette.json missing; run --build-palette first`
+或
+`palette incomplete: X/222 colors`
+请继续执行 `--build-palette --resume`。
 
 仅使用 eth_call / view，不连接钱包、不发送交易。
