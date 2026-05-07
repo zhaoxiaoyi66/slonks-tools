@@ -16,3 +16,7 @@
 请继续执行 `--build-palette --resume`。
 
 仅使用 eth_call / view，不连接钱包、不发送交易。
+
+
+可尝试直接提取公开资料中的 palette（不走RPC扫图）：
+`python slonks_local_simulator.py --extract-palette-web`

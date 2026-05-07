@@ -105,6 +105,32 @@ def simulate_pair(rpc,survivor,donor,palette):
         if pal[gen[p]]!=rgba(og,p): diff+=1
     return {'survivor_id':survivor,'donor_id':donor,'base_source_id':s['source_id'],'donor_source_id':d['source_id'],'level':s['level'],'result_slop':diff,'status':'ok','note':''},None
 
+
+def extract_palette_from_web():
+    print('trying web extraction for palette...',flush=True)
+    urls=[
+      'https://slonks.xyz/about',
+      'https://etherscan.io/address/0x103d4ef6e7d87ea27355b402a4ae0875c3fb32a1#code',
+    ]
+    text=''
+    for u in urls:
+      try:text+=requests.get(u,timeout=(5,10)).text+'
+'
+      except: pass
+    import re
+    hexes=re.findall(r'#[0-9a-fA-F]{6,8}',text)
+    uniq=[]
+    for h in hexes:
+      h=h.lower().replace('#','')
+      if len(h)==6: h=h+'ff'
+      if h not in uniq: uniq.append(h)
+    if len(uniq)>=222:
+      pal={str(i):uniq[i] for i in range(222)}
+      Path('palette.json').write_text(json.dumps(pal,indent=2))
+      print('palette extracted from web and written to palette.json',flush=True)
+      return True
+    print(f'web extraction insufficient colors: {len(uniq)}',flush=True)
+    return False
 def main():
     print('starting slonks_local_simulator',flush=True)
     ap=argparse.ArgumentParser()
@@ -120,7 +146,11 @@ def main():
     ap.add_argument('--max-samples',type=int,default=0)
     ap.add_argument('--sleep',type=float,default=0.25)
     ap.add_argument('--debug',action='store_true')
+    ap.add_argument('--extract-palette-web',action='store_true')
     a=ap.parse_args(); rpc=Rpc(a.rpc,a.timeout,a.debug)
+
+    if a.extract_palette_web:
+        extract_palette_from_web(); return
 
     if a.build_palette:
         pal=build_palette(rpc,a.start_id,a.end_id,a.resume,a.max_samples,a.sleep)
