@@ -1,30 +1,22 @@
-# Slonks best merge finder (Python + Playwright)
+# Slonks listing monitor
 
-## 第一次安装（Windows）
-1. `python -m venv .venv`
-2. `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
-3. `.venv\Scripts\activate`
-4. `pip install -r requirements.txt`
-5. `playwright install chromium`
+## 安装依赖（Windows）
+`pip install -r requirements.txt`
 
-## 每次运行（Windows）
-1. `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
-2. `.venv\Scripts\activate`
-3. `python slonks_find_best_merge.py --base 1139 --max-candidates 20 --debug`
+## 运行一次
+`python slonks_listing_monitor.py --base 1139 --once --top 10`
 
-## 手动候选模式
-`python slonks_find_best_merge.py --base 1139 --candidates candidates.csv --debug`
+## 每 60 秒监控
+`python slonks_listing_monitor.py --base 1139 --interval 60 --top 10`
 
-## 常用参数
-- `--rpc https://eth.llamarpc.com`
-- `--timeout 10`
-- `--start-id 0 --end-id 500`
-- `--max-candidates 20`
-- `--full-scan`
-- `--headful`
-- `--keep-open`
+## 限制价格
+`python slonks_listing_monitor.py --base 1139 --max-price 0.3 --top 10`
 
-## 输出文件
-- `ranked_results.csv`
-- `best_merge.txt`
-- `scan_log.csv`
+## 手动 CSV fallback
+`python slonks_listing_monitor.py --listings listings.csv --once`
+
+CSV: `token_id,price_eth,url,marketplace`
+
+输出文件：
+- `listing_hits.csv`
+- `seen_alerts.json`
