@@ -1,26 +1,19 @@
-# Slonks Phase2 Automation (Python + Playwright)
+# Slonks best merge finder (Python + Playwright)
 
-仅使用官方 https://slonks.xyz/merge-lab 的 Preview/Simulate（no-gas）结果，不连接钱包、不发交易。
-
-## Windows 小白步骤
+## Windows 小白运行
 1. `python -m venv .venv`
 2. `.venv\Scripts\activate`
 3. `pip install -r requirements.txt`
 4. `playwright install chromium`
-5. `python slonks_phase2_automation.py --base 1139 --candidates candidates.csv --out pairs.csv`
+5. `python slonks_find_best_merge.py --base 1139`
 
-## candidates.csv 格式
-`token_id,price_eth,url,marketplace`
+## 常用参数
+- `--max-candidates 100`（默认）
+- `--full-scan` 扫描全部同级候选
+- `--headful` 调试显示浏览器
+- `--keep-open` 结束后不立即关浏览器
 
-## 可选参数
-- `--both-directions`：同时测试 candidate->base（默认关闭，避免烧 base）
-- `--headless`：无头模式
-
-输出：
-- `pairs.csv`
-- `ranked_pairs.csv`
-- `merge_plan.csv`
-
-
-## 调试命令
-`python slonks_phase2_automation.py --base 1139 --candidates candidates.csv --debug --keep-open --slowmo 300`
+输出文件：
+- `ranked_results.csv`
+- `scan_log.csv`
+- `best_merge.txt`
