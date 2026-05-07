@@ -1,22 +1,17 @@
-# Slonks listing monitor
+# Slonks minimal merge tools
 
-## 安装依赖（Windows）
-`pip install -r requirements.txt`
+先打通单组 preview：
+`python slonks_pair_preview.py --survivor 1139 --donor 583 --manual --headful --keep-open`
 
-## 运行一次
-`python slonks_listing_monitor.py --base 1139 --once --top 10`
+自动单组：
+`python slonks_pair_preview.py --survivor 1139 --donor 583 --debug --headful --keep-open`
 
-## 每 60 秒监控
-`python slonks_listing_monitor.py --base 1139 --interval 60 --top 10`
+批量同级（不含市场/价格）：
+`python slonks_find_best_merge.py --base 1139 --start-id 0 --end-id 200 --max-candidates 20 --debug`
 
-## 限制价格
-`python slonks_listing_monitor.py --base 1139 --max-price 0.3 --top 10`
-
-## 手动 CSV fallback
-`python slonks_listing_monitor.py --listings listings.csv --once`
-
-CSV: `token_id,price_eth,url,marketplace`
-
-输出文件：
-- `listing_hits.csv`
-- `seen_alerts.json`
+输出：
+- `pair_preview_result.csv`
+- `ranked_results.csv`
+- `scan_log.csv`
+- `best_merge.txt`
+- `screenshots/`
