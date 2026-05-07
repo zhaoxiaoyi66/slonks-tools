@@ -77,16 +77,35 @@ def safe_preview_btn(page):
             if not BLOCK.search(t): return b
     raise RuntimeError('PREVIEW_FAIL preview button not found')
 
-def read_result(page, timeout_s=10):
+
+def shot(page,name):
+    d=Path('screenshots'); d.mkdir(exist_ok=True)
+    path=d/f"{name}.png"; page.screenshot(path=str(path),full_page=True)
+    return str(path)
+
+def select_tokens(page, base, donor):
+    ins=page.locator('input')
+    if ins.count()<2: return False,False,'page structure mismatch: inputs<2'
+    ins.nth(0).fill(str(base)); ins.nth(1).fill(str(donor))
+    body=page.inner_text('body')
+    return (str(base) in body),(str(donor) in body),'ok'
+
+def read_result_flexible(page, timeout_s=15):
     end=time.time()+timeout_s
     while time.time()<end:
-        for loc in [page.locator(r"text=/result\s*slop/i"),page.locator(r"text=/slop/i")]:
-            if loc.count()==0: continue
-            txt=loc.first.inner_text(timeout=1200); m=re.findall(r"[-+]?\d+(?:\.\d+)?",txt)
-            if m: return float(m[-1])
-        time.sleep(0.4)
-    raise RuntimeError('PREVIEW_FAIL result slop not found')
-
+        patterns=[r"text=/result\s*slop/i",r"text=/slop/i",r"text=/result/i"]
+        for pat in patterns:
+            loc=page.locator(pat)
+            if loc.count()>0:
+                txt=loc.first.inner_text(timeout=1000)
+                m=re.findall(r"[-+]?\d+(?:\.\d+)?",txt)
+                if m: return float(m[-1]),f'from {pat}'
+        txt=page.inner_text('body')
+        if 'slop' in txt.lower() or 'result' in txt.lower():
+            m=re.findall(r"[-+]?\d+(?:\.\d+)?",txt)
+            if m: return float(m[-1]),'from body numeric'
+        time.sleep(0.5)
+    raise RuntimeError('result_not_found')
 def load_candidates_csv(path:Path):
     out=[]
     for r in csv.DictReader(path.open('r',encoding='utf-8',newline='')):
@@ -157,24 +176,40 @@ def main():
         browser=pw.chromium.launch(headless=not args.headful)
         page=browser.new_page(); page.goto('https://slonks.xyz/merge-lab',wait_until='domcontentloaded',timeout=90000)
         for c in candidates:
-            donor=c['token_id']; log(f"[preview] donor={donor}",args.debug)
+            donor=c['token_id']; log(f"[preview] donor={donor}",True)
+            ss_before=shot(page,f'before_select_{args.base}_{donor}')
+            sel_s,sel_d,sel_note=select_tokens(page,args.base,donor)
+            ss_after_sel=shot(page,f'after_select_{args.base}_{donor}')
+            print(f"  survivor_selected={sel_s} donor_selected={sel_d}")
+            if not (sel_s and sel_d):
+                note='selection_failed: base/donor not both visible'
+                results.append({'survivor_id':args.base,'donor_id':donor,'base_slop':base_slop,'donor_slop':c.get('donor_slop'),'result_slop':'','gross_delta':'','net_delta':'','price_eth':c.get('price_eth',''),'gross_slop_per_eth':'','net_slop_per_eth':'','status':'selection_failed','note':note})
+                scan_rows.append({'token_id':donor,'status':'selection_failed','note':note,'screenshot_path':ss_after_sel})
+                continue
             try:
-                ins=page.locator('input')
-                if ins.count()<2: raise RuntimeError('PREVIEW_FAIL keep/burn input not found')
-                ins.nth(0).fill(str(args.base)); ins.nth(1).fill(str(donor))
                 btn=safe_preview_btn(page)
-                if not btn.is_enabled(): raise RuntimeError('PREVIEW_FAIL preview button disabled')
+                if not btn.is_enabled():
+                    raise RuntimeError('preview_unavailable')
                 btn.click(timeout=3000)
-                rs=read_result(page,args.timeout)
+                print('  preview_clicked=True')
+                ss_after_preview=shot(page,f'after_preview_{args.base}_{donor}')
+                rs,src=read_result_flexible(page,15)
+                print(f'  result_found=True result_slop={rs} source={src}')
                 ds=c.get('donor_slop')
                 gd=(rs-base_slop) if base_slop is not None else ''
                 nd=(rs-base_slop-ds) if (base_slop is not None and ds is not None) else ''
                 pe=float(c['price_eth']) if str(c.get('price_eth','')).strip() else None
                 gpe=(gd/pe) if isinstance(gd,(int,float)) and pe and pe>0 else ''
                 npe=(nd/pe) if isinstance(nd,(int,float)) and pe and pe>0 else ''
-                results.append({'survivor_id':args.base,'donor_id':donor,'base_slop':base_slop,'donor_slop':ds,'result_slop':rs,'gross_delta':gd,'net_delta':nd,'price_eth':c.get('price_eth',''),'gross_slop_per_eth':gpe,'net_slop_per_eth':npe,'status':'ok','note':''})
+                results.append({'survivor_id':args.base,'donor_id':donor,'base_slop':base_slop,'donor_slop':ds,'result_slop':rs,'gross_delta':gd,'net_delta':nd,'price_eth':c.get('price_eth',''),'gross_slop_per_eth':gpe,'net_slop_per_eth':npe,'status':'ok','note':src})
+                scan_rows.append({'token_id':donor,'status':'preview_ok','note':src,'screenshot_path':ss_after_preview})
             except Exception as e:
-                results.append({'survivor_id':args.base,'donor_id':donor,'base_slop':base_slop,'donor_slop':c.get('donor_slop'),'result_slop':'','gross_delta':'','net_delta':'','price_eth':c.get('price_eth',''),'gross_slop_per_eth':'','net_slop_per_eth':'','status':'preview_error','note':str(e)})
+                err=str(e)
+                status='result_not_found' if 'result_not_found' in err else ('preview_unavailable' if 'preview_unavailable' in err else 'preview_error')
+                print(f'  preview_clicked=False/failed reason={err}')
+                ss_err=shot(page,f'preview_error_{args.base}_{donor}')
+                results.append({'survivor_id':args.base,'donor_id':donor,'base_slop':base_slop,'donor_slop':c.get('donor_slop'),'result_slop':'','gross_delta':'','net_delta':'','price_eth':c.get('price_eth',''),'gross_slop_per_eth':'','net_slop_per_eth':'','status':status,'note':err})
+                scan_rows.append({'token_id':donor,'status':status,'note':err,'screenshot_path':ss_err})
         if args.keep_open: input('Press Enter to close browser...')
         browser.close()
 
@@ -188,7 +223,12 @@ def main():
         fn=['survivor_id','donor_id','base_slop','donor_slop','result_slop','gross_delta','net_delta','price_eth','gross_slop_per_eth','net_slop_per_eth','status','note']
         w=csv.DictWriter(f,fieldnames=fn); w.writeheader(); w.writerows(results)
     with Path('scan_log.csv').open('w',newline='',encoding='utf-8') as f:
-        w=csv.DictWriter(f,fieldnames=['token_id','status','note']); w.writeheader(); w.writerows(scan_rows)
+        for r in scan_rows:
+            if 'screenshot_path' not in r:
+                r['screenshot_path']=''
+        w=csv.DictWriter(f,fieldnames=['token_id','status','note','screenshot_path'])
+        w.writeheader()
+        w.writerows(scan_rows)
 
     valid=[r for r in results if r['status']=='ok']
     if not valid:
