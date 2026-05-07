@@ -68,15 +68,42 @@ def slop_from_tokenuri(rc:RpcClient, tid:int):
     except Exception:
         return None
 
-def safe_preview_btn(page):
-    opts=[page.get_by_text('Preview',exact=False),page.locator("button:has-text('Preview')"),page.locator("button:has-text('Simulate')"),page.get_by_role('button',name=re.compile(r'preview|simulate|no\s*-?\s*gas',re.I))]
-    for o in opts:
-        if o.count()==0: continue
-        for i in range(o.count()):
-            b=o.nth(i); t=(b.inner_text(timeout=800) or '').strip()
-            if not BLOCK.search(t): return b
-    raise RuntimeError('PREVIEW_FAIL preview button not found')
-
+def safe_click_preview(page, base:int, donor:int, debug=False):
+    danger=re.compile(r"merge|connect|wallet|approve|confirm|transaction|mint|burn",re.I)
+    okpat=re.compile(r"preview|simulate",re.I)
+    buttons=page.locator('button')
+    texts=[]; safe=[]
+    for i in range(buttons.count()):
+        b=buttons.nth(i)
+        t=(b.inner_text(timeout=800) or '').strip()
+        texts.append(t)
+        if okpat.search(t) and not danger.search(t):
+            safe.append((b,t))
+    if debug:
+        print('[debug] all button texts:')
+        for t in texts: print('  -',t)
+        print('[debug] safe preview candidates:', [t for _,t in safe])
+    if not safe:
+        raise RuntimeError('preview_button_not_found')
+    for b,t in safe:
+        if not b.is_visible() or not b.is_enabled():
+            continue
+        b.scroll_into_view_if_needed()
+        page.wait_for_timeout(300)
+        page.evaluate("el=>el.scrollIntoView({block:'center'})", b)
+        page.wait_for_timeout(300)
+        try:
+            b.click(timeout=3000)
+            if debug: print(f"[debug] clicked preview button: {t}")
+            return t
+        except Exception:
+            shot_path=shot(page,f'preview_click_intercept_{base}_{donor}')
+            if debug: print(f'[debug] click intercept, screenshot={shot_path}')
+            page.mouse.wheel(0,400); page.wait_for_timeout(200)
+            b.click(force=True,timeout=3000)
+            if debug: print(f"[debug] force clicked preview button: {t}")
+            return t
+    raise RuntimeError('preview_button_not_found')
 
 def shot(page,name):
     d=Path('screenshots'); d.mkdir(exist_ok=True)
@@ -193,7 +220,7 @@ def main():
                 btn.click(timeout=3000)
                 print('  preview_clicked=True')
                 ss_after_preview=shot(page,f'after_preview_{args.base}_{donor}')
-                rs,src=read_result_flexible(page,15)
+                rs,src=read_result_flexible(page,20)
                 print(f'  result_found=True result_slop={rs} source={src}')
                 ds=c.get('donor_slop')
                 gd=(rs-base_slop) if base_slop is not None else ''
