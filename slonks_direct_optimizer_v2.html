@@ -38,15 +38,19 @@
 </head>
 <body>
 <header>
-  <h1>Slonks 一键合成组合分析器 v2</h1>
-  <p>输入 Slonks 编号，它会读取链上数据、按同 Level 两两组合、模拟 embedding 平均，并给出最优 survivor/donor 方向。只读链上，不连接钱包，不会上链。</p>
+  <h1>Slonks 小白版合成分析网页（免安装）</h1>
+  <p>直接双击打开这个 HTML 就能用：上传 holdings.csv 或粘贴编号，网页会只读链上数据、自动同级两两+双方向分析，并导出 pairs.csv / ranked_pairs.csv / merge_plan.csv。不会连接钱包，不会上链。</p>
 </header>
 
 <main>
   <div class="grid">
     <section class="card">
       <h2>输入</h2>
-      <label>Slonks 编号，空格/逗号/换行都可以</label>
+      <label>方式A：上传 holdings.csv（必须有 token_id 列，可选 level 列）</label>
+      <input id="holdingsFile" type="file" accept=".csv" onchange="importHoldingsCSV(event)"/>
+      <p class="small">上传后会自动填充下面编号输入框。</p>
+
+      <label>方式B：手动输入 Slonks 编号，空格/逗号/换行都可以</label>
       <textarea id="ids" oninput="previewIds()">1139 583 8096</textarea>
       <p class="small">已识别：<span id="parsedIds" class="mono"></span></p>
 
@@ -66,7 +70,9 @@
       <textarea id="calibIds" style="min-height:60px">0 1 2 3 4 5 6 7 8 9 2352 5290 8638 3784 624 2698 2510 2639 7035 1139 583 8096</textarea>
 
       <button onclick="run()">开始分析</button>
-      <button class="secondary" onclick="downloadCSV()">下载结果 CSV</button>
+      <button class="secondary" onclick="downloadPairsCSV()">下载 pairs.csv</button>
+      <button class="secondary" onclick="downloadRankedCSV()">下载 ranked_pairs.csv</button>
+      <button class="secondary" onclick="downloadPlanCSV()">下载 merge_plan.csv</button>
       <button class="danger" onclick="clearCache()">清缓存</button>
     </section>
 
@@ -104,8 +110,32 @@ const ABI = {
   model: ["function sourceEmbedding(uint256 sourceId) view returns (bytes)","function renderEmbeddingPixels(bytes embedding) view returns (bytes)"],
   merge: ["function mergeLevel(uint256 tokenId) view returns (uint8)","function mergeEmbedding(uint256 tokenId) view returns (bytes)"]
 };
-let provider, C, latestRows = [], latestTokens = [], palette = new Map(), tokenCache = new Map();
+let provider, C, latestRows = [], latestTokens = [], latestRankedRows = [], latestPlanRows = [], palette = new Map(), tokenCache = new Map();
 
+
+function parseCSV(text){
+  const lines=String(text||'').trim().split(/\r?\n/).filter(Boolean);
+  if(!lines.length) return [];
+  const header=lines[0].split(',').map(x=>x.trim().toLowerCase());
+  const idxToken=header.indexOf('token_id');
+  if(idxToken<0) throw new Error('holdings.csv 缺少 token_id 列');
+  const out=[];
+  for(let i=1;i<lines.length;i++){
+    const cols=lines[i].split(',').map(x=>x.trim());
+    const v=Number(cols[idxToken]);
+    if(Number.isInteger(v)&&v>=0) out.push(v);
+  }
+  return [...new Set(out)];
+}
+async function importHoldingsCSV(e){
+  const f=e.target.files?.[0];
+  if(!f) return;
+  const txt=await f.text();
+  const ids=parseCSV(txt);
+  document.getElementById('ids').value=ids.join(' ');
+  previewIds();
+  setStatus(`已从 ${f.name} 导入 ${ids.length} 个 token_id。`);
+}
 function parseIds(text) {
   const normalized = String(text || "").replace(/[，、；;|\t\r\n]+/g, " ");
   return [...new Set((normalized.match(/[0-9]+/g) || []).map(x => Number(x)).filter(x => Number.isInteger(x) && x >= 0 && x < 10000))];
@@ -245,13 +275,41 @@ async function run(){
     log("分析完成。");
   }catch(e){ log("错误：" + (e.shortMessage||e.message||String(e))); }
 }
-function downloadCSV(){
+function toCsv(rows, fields){
+  const lines=[fields.join(',')];
+  for(const r of rows) lines.push(fields.map(f=>JSON.stringify(r[f]??'')).join(','));
+  return lines.join('\n');
+}
+function forceDownload(name,text){
+  const blob=new Blob([text],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=name; a.click(); URL.revokeObjectURL(url);
+}
+function buildRankedAndPlan(){
+  latestRankedRows=[...latestRows].sort((a,b)=>(b.resultSlop??-99999)-(a.resultSlop??-99999));
+  const used=new Set(); latestPlanRows=[];
+  for(const r of latestRankedRows){
+    const s=String(r.survivor), d=String(r.donor);
+    if(used.has(s)||used.has(d)) continue;
+    latestPlanRows.push(r); used.add(s); used.add(d);
+  }
+}
+function downloadPairsCSV(){
   if(!latestRows.length) return;
-  const fields=["survivor","donor","level","survivorSlop","donorSlop","resultSlop","exact","knownMismatch","unknown","confidence","gross","net","unknownIndexes"];
-  const lines=[fields.join(",")];
-  for(const r of latestRows) lines.push(fields.map(f=>JSON.stringify(r[f]??"")).join(","));
-  const blob=new Blob([lines.join("\n")],{type:"text/csv;charset=utf-8"});
-  const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download="slonks_direct_results.csv"; a.click(); URL.revokeObjectURL(url);
+  const fields=['survivor','donor','level','survivorSlop','donorSlop','resultSlop','exact','knownMismatch','unknown','confidence','gross','net','unknownIndexes'];
+  forceDownload('pairs.csv',toCsv(latestRows,fields));
+}
+function downloadRankedCSV(){
+  if(!latestRows.length) return;
+  buildRankedAndPlan();
+  const rows=latestRankedRows.map((r,i)=>({...r,rank:i+1}));
+  const fields=['rank','survivor','donor','level','resultSlop','net','gross','exact','confidence'];
+  forceDownload('ranked_pairs.csv',toCsv(rows,fields));
+}
+function downloadPlanCSV(){
+  if(!latestRows.length) return;
+  buildRankedAndPlan();
+  const fields=['survivor','donor','level','resultSlop','net','gross','exact','confidence'];
+  forceDownload('merge_plan.csv',toCsv(latestPlanRows,fields));
 }
 function clearCache(){ tokenCache.clear(); palette=new Map(); setStatus("缓存已清。"); }
 previewIds();
