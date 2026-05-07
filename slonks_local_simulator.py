@@ -106,7 +106,7 @@ def simulate_pair(rpc,survivor,donor,palette):
     return {'survivor_id':survivor,'donor_id':donor,'base_source_id':s['source_id'],'donor_source_id':d['source_id'],'level':s['level'],'result_slop':diff,'status':'ok','note':''},None
 
 
-def extract_palette_from_web():
+def extract_palette_from_web(debug=False):
     print('trying web extraction for palette...',flush=True)
     urls=[
       'https://slonks.xyz/about',
@@ -114,9 +114,13 @@ def extract_palette_from_web():
     ]
     text=''
     for u in urls:
-      try:text+=requests.get(u,timeout=(5,10)).text+'
-'
-      except: pass
+        try:
+            resp = requests.get(u, timeout=(5, 10))
+            resp.raise_for_status()
+            text += resp.text + "\n"
+        except Exception as e:
+            if debug:
+                print(f"[fetch-skip] {u} {e}", flush=True)
     import re
     hexes=re.findall(r'#[0-9a-fA-F]{6,8}',text)
     uniq=[]
@@ -150,7 +154,7 @@ def main():
     a=ap.parse_args(); rpc=Rpc(a.rpc,a.timeout,a.debug)
 
     if a.extract_palette_web:
-        extract_palette_from_web(); return
+        extract_palette_from_web(a.debug); return
 
     if a.build_palette:
         pal=build_palette(rpc,a.start_id,a.end_id,a.resume,a.max_samples,a.sleep)
