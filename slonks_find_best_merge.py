@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse,base64,csv,json,re,time
+import argparse,base64,csv,json,re,time,sys
 from pathlib import Path
 import requests
 from playwright.sync_api import sync_playwright
@@ -19,13 +19,27 @@ def pad64(n:int)->str: return hex(n)[2:].rjust(64,'0')
 
 def eth_call(to,data):
     p={"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":to,"data":data},"latest"]}
-    r=requests.post(RPC,json=p,timeout=20).json()
+    try:
+        resp=requests.post(RPC,json=p,timeout=20)
+    except Exception as e:
+        raise RuntimeError(f"API_FAIL network: {e}")
+    if resp.status_code!=200:
+        raise RuntimeError(f"API_FAIL HTTP {resp.status_code}: {resp.text[:300]}")
+    try:r=resp.json()
+    except Exception:
+        raise RuntimeError(f"API_FAIL non-json: {resp.text[:300]}")
     if 'error' in r: raise RuntimeError(r['error'].get('message','eth_call error'))
-    return r['result']
+    return r.get('result','0x')
 
-def owner_exists(tid:int)->bool:
-    try: eth_call(SLONKS,'0x6352211e'+pad64(tid)); return True
-    except: return False
+def owner_check(tid:int):
+    try:
+        out=eth_call(SLONKS,'0x6352211e'+pad64(tid))
+        return True,out,''
+    except Exception as e:
+        msg=str(e)
+        if 'execution reverted' in msg or 'revert' in msg or 'OWNER_FAIL' in msg:
+            return False,'',f'OWNER_FAIL {msg}'
+        return None,'',f'API_FAIL {msg}'
 
 def merge_level(tid:int)->int:
     try:
@@ -85,17 +99,24 @@ def main():
     ap.add_argument('--keep-open',action='store_true')
     args=ap.parse_args()
 
-    base_exists=owner_exists(args.base)
-    if not base_exists: raise SystemExit('base token not found/burned')
+    print(f'[debug] checking base token id={args.base}')
+    print(f'[debug] RPC URL={RPC}')
+    ok,owner_raw,err=owner_check(args.base)
+    print(f'[debug] ownerOf raw={owner_raw}')
+    if ok is False: raise SystemExit(f'OWNER_FAIL = token 不存在 / burned / 未 mint; detail: {err}')
+    if ok is None: raise SystemExit(f'API_FAIL = API 请求失败; detail: {err}')
     base_level=merge_level(args.base)
     base_slop=slop_from_tokenuri(args.base)
-    if base_slop is None: raise SystemExit('base slop read failed from tokenURI')
+    if base_slop is None: print('METADATA_FAIL base slop read failed from tokenURI; continue with preview-only mode')
 
     scan_rows=[]; cands=[]
     for tid in range(10000):
         if tid==args.base: continue
-        if not owner_exists(tid):
-            scan_rows.append({'token_id':tid,'status':'skip','note':'not exists'}); continue
+        ok2,_,err2=owner_check(tid)
+        if ok2 is False:
+            scan_rows.append({'token_id':tid,'status':'skip','note':'OWNER_FAIL token not exists/burned'}); continue
+        if ok2 is None:
+            scan_rows.append({'token_id':tid,'status':'skip','note':f'API_FAIL {err2}'}); continue
         lv=merge_level(tid)
         if lv!=base_level:
             scan_rows.append({'token_id':tid,'status':'skip','note':f'level {lv} != {base_level}'}); continue
@@ -114,16 +135,21 @@ def main():
                 fill_pair(page,args.base,tid)
                 safe_preview_btn(page).click(timeout=3000)
                 rs=read_result(page)
-                gross=rs-base_slop; net=rs-base_slop-donor_slop
+                gross=(rs-base_slop) if base_slop is not None else ''
+                net=(rs-base_slop-donor_slop) if (base_slop is not None and donor_slop is not None) else ''
                 results.append({'base_id':args.base,'donor_id':tid,'base_slop':base_slop,'donor_slop':donor_slop,'result_slop':rs,'gross_delta':gross,'net_delta':net})
                 scan_rows.append({'token_id':tid,'status':'preview_ok','note':f'result_slop={rs}'})
             except Exception as e:
-                scan_rows.append({'token_id':tid,'status':'error','note':str(e)})
+                scan_rows.append({'token_id':tid,'status':'error','note':'PREVIEW_FAIL '+str(e)})
         if args.keep_open:
             input('Press Enter to close browser...')
         browser.close()
 
-    results.sort(key=lambda r:(r['net_delta'],r['gross_delta'],r['result_slop']),reverse=True)
+    def k(r):
+        n=r['net_delta'] if isinstance(r['net_delta'],(int,float)) else -1e18
+        g=r['gross_delta'] if isinstance(r['gross_delta'],(int,float)) else -1e18
+        return (n,g,r['result_slop'])
+    results.sort(key=k,reverse=True)
     with Path('ranked_results.csv').open('w',newline='',encoding='utf-8') as f:
         w=csv.DictWriter(f,fieldnames=['base_id','donor_id','base_slop','donor_slop','result_slop','gross_delta','net_delta']);w.writeheader();w.writerows(results)
     with Path('scan_log.csv').open('w',newline='',encoding='utf-8') as f:
